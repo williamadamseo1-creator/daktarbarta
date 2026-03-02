@@ -91,6 +91,12 @@ ASSET_EXTENSIONS = {
     ".zip",
 }
 
+GOOGLE_SITE_VERIFICATION_CONTENT = "i_R-6SagtmSDXdNM-os-UUCSsrkLL4XbDsDRN37Wwyo"
+GOOGLE_SITE_VERIFICATION_META = (
+    '<meta name="google-site-verification" '
+    f'content="{GOOGLE_SITE_VERIFICATION_CONTENT}" />'
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export WP XML site to static files.")
@@ -301,6 +307,40 @@ def fetch(session: requests.Session, url: str) -> requests.Response | None:
         return None
 
 
+def ensure_google_site_verification_html(html: str) -> str:
+    meta_pattern = re.compile(
+        r"<meta\b[^>]*\bname\s*=\s*([\"'])google-site-verification\1[^>]*>",
+        flags=re.IGNORECASE,
+    )
+    content_pattern = re.compile(
+        r"\bcontent\s*=\s*([\"']).*?\1",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    match = meta_pattern.search(html)
+    if match:
+        meta_tag = match.group(0)
+        if content_pattern.search(meta_tag):
+            updated_tag = content_pattern.sub(
+                f'content="{GOOGLE_SITE_VERIFICATION_CONTENT}"', meta_tag, count=1
+            )
+        else:
+            updated_tag = meta_tag[:-1] + f' content="{GOOGLE_SITE_VERIFICATION_CONTENT}">'
+        return html[: match.start()] + updated_tag + html[match.end() :]
+
+    head_close_pattern = re.compile(r"</head\s*>", flags=re.IGNORECASE)
+    head_close = head_close_pattern.search(html)
+    if head_close:
+        return (
+            html[: head_close.start()]
+            + GOOGLE_SITE_VERIFICATION_META
+            + "\n"
+            + html[head_close.start() :]
+        )
+
+    return GOOGLE_SITE_VERIFICATION_META + "\n" + html
+
+
 def main() -> int:
     args = parse_args()
     xml_path = Path(args.xml).resolve()
@@ -365,10 +405,12 @@ def main() -> int:
             print(f"[asset] {final_url}")
             continue
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        html_text = ensure_google_site_verification_html(resp.text)
+        soup = BeautifulSoup(html_text, "html.parser")
+        html_bytes = html_text.encode("utf-8")
 
         for output_path in url_to_output_paths(final_url, out_dir, is_html=True):
-            write_file(output_path, resp.content)
+            write_file(output_path, html_bytes)
         print(f"[page] {final_url}")
 
         if args.follow_links:
@@ -408,6 +450,7 @@ def main() -> int:
     if not fallback_404.exists():
         fallback_404.write_text(
             "<!doctype html><html><head><meta charset='utf-8'>"
+            f"<meta name='google-site-verification' content='{GOOGLE_SITE_VERIFICATION_CONTENT}'>"
             "<title>404</title></head><body><h1>404 - Not Found</h1></body></html>",
             encoding="utf-8",
         )

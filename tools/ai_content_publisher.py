@@ -436,12 +436,59 @@ def sanitize_additional_keywords(raw: Any, focus_keyword: str, language: str) ->
     return dedup[:5]
 
 
+WINDOWS_RESERVED_NAMES = {
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+}
+
+
 def slugify(text: str) -> str:
     low = text.lower().strip()
     cleaned = re.sub(r"[^\w\u0980-\u09FF\s-]", " ", low, flags=re.UNICODE)
     slug = re.sub(r"[\s_-]+", "-", cleaned).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
-    return (slug[:90].strip("-") or "post")
+    slug = (slug[:90].strip("-") or "post")
+
+    # Keep encoded directory name short enough for Windows filesystem segment limits.
+    max_encoded_len = 180
+    encoded = quote(slug, safe="-")
+    if len(encoded) > max_encoded_len:
+        parts = [p for p in slug.split("-") if p]
+        kept: list[str] = []
+        for part in parts:
+            candidate = "-".join(kept + [part]) if kept else part
+            if len(quote(candidate, safe="-")) <= max_encoded_len:
+                kept.append(part)
+            else:
+                break
+        slug = "-".join(kept) if kept else (parts[0] if parts else "post")
+        while slug and len(quote(slug, safe="-")) > max_encoded_len:
+            slug = slug[:-1].rstrip("-")
+        slug = slug or "post"
+
+    if slug.lower() in WINDOWS_RESERVED_NAMES:
+        slug = f"post-{slug}"
+    return slug
 
 
 def unique_slug(base_slug: str, used_slugs: set[str]) -> str:

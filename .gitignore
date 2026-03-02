@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+logs/*.log
+data/content_pipeline_state.json
+data/posts_manifest.json

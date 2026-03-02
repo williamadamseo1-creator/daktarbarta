@@ -9,6 +9,11 @@ This repo contains a static export of `daktarbarta.com` generated from:
 
 - `dist/`: Cloudflare Pages-ready static site
 - `tools/export_wp_xml_to_static.py`: repeatable export script
+- Auto-generated SEO files on each export:
+  - `dist/robots.txt`
+  - `dist/sitemap.xml`
+  - `dist/sitemap_index.xml`
+  - `dist/_headers` (cache + basic security headers)
 
 ## Cloudflare Pages setup
 

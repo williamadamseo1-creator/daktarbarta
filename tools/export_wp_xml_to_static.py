@@ -18,9 +18,11 @@ import shutil
 import sys
 import xml.etree.ElementTree as ET
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import unquote, urldefrag, urljoin, urlparse
+from xml.sax.saxutils import escape
 
 import requests
 from bs4 import BeautifulSoup
@@ -341,6 +343,165 @@ def ensure_google_site_verification_html(html: str) -> str:
     return GOOGLE_SITE_VERIFICATION_META + "\n" + html
 
 
+def _normalize_lastmod(value: str | None) -> str | None:
+    if not value:
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+        return parsed.date().isoformat()
+    except ValueError:
+        pass
+    match = re.search(r"\d{4}-\d{2}-\d{2}", candidate)
+    if match:
+        return match.group(0)
+    return None
+
+
+def _fallback_url_from_path(base_url: str, html_path: Path, out_dir: Path) -> str:
+    rel = html_path.relative_to(out_dir)
+    if rel == Path("index.html"):
+        url_path = "/"
+    elif rel.name == "index.html":
+        dir_path = "/".join(rel.parts[:-1])
+        url_path = f"/{dir_path}/" if dir_path else "/"
+    else:
+        url_path = "/" + "/".join(rel.parts)
+    return urljoin(base_url.rstrip("/") + "/", url_path.lstrip("/"))
+
+
+def generate_seo_files(out_dir: Path, base_url: str) -> tuple[int, int]:
+    canonical_entries: dict[str, str] = {}
+
+    for html_path in sorted(out_dir.rglob("*.html")):
+        if html_path.name.lower() == "404.html":
+            continue
+        if any(part.startswith(".") for part in html_path.parts):
+            continue
+
+        try:
+            html_text = html_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            html_text = html_path.read_text(encoding="utf-8", errors="ignore")
+
+        soup = BeautifulSoup(html_text, "html.parser")
+
+        robots_meta = soup.find(
+            "meta", attrs={"name": re.compile(r"^robots$", flags=re.IGNORECASE)}
+        )
+        robots_content = (robots_meta.get("content") if robots_meta else "") or ""
+        if "noindex" in robots_content.lower():
+            continue
+
+        canonical_url: str | None = None
+        canonical_tag = soup.find(
+            "link",
+            attrs={
+                "rel": lambda rel: rel
+                and (
+                    (isinstance(rel, str) and "canonical" in rel.lower())
+                    or (
+                        isinstance(rel, list)
+                        and any("canonical" in str(item).lower() for item in rel)
+                    )
+                )
+            },
+        )
+        if canonical_tag and canonical_tag.get("href"):
+            raw_canonical = canonical_tag["href"].strip()
+            parsed = urlparse(raw_canonical)
+            if parsed.scheme in {"http", "https"} and parsed.netloc:
+                canonical_url = urldefrag(raw_canonical)[0]
+
+        if not canonical_url:
+            canonical_url = _fallback_url_from_path(base_url, html_path, out_dir)
+
+        lastmod = None
+        for attr_name, attr_value in (
+            ("property", "article:modified_time"),
+            ("property", "og:updated_time"),
+            ("name", "lastmod"),
+        ):
+            tag = soup.find("meta", attrs={attr_name: attr_value})
+            if tag and tag.get("content"):
+                lastmod = _normalize_lastmod(tag["content"])
+                if lastmod:
+                    break
+
+        if not lastmod:
+            file_dt = datetime.fromtimestamp(html_path.stat().st_mtime, tz=timezone.utc)
+            lastmod = file_dt.date().isoformat()
+
+        previous = canonical_entries.get(canonical_url)
+        if previous is None or lastmod > previous:
+            canonical_entries[canonical_url] = lastmod
+
+    sorted_items = sorted(canonical_entries.items())
+    sitemap_lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+    for url, lastmod in sorted_items:
+        sitemap_lines.append("  <url>")
+        sitemap_lines.append(f"    <loc>{escape(url)}</loc>")
+        sitemap_lines.append(f"    <lastmod>{lastmod}</lastmod>")
+        sitemap_lines.append("  </url>")
+    sitemap_lines.append("</urlset>")
+
+    sitemap_xml = "\n".join(sitemap_lines) + "\n"
+    (out_dir / "sitemap.xml").write_text(sitemap_xml, encoding="utf-8")
+
+    index_lastmod = max(canonical_entries.values()) if canonical_entries else datetime.now(
+        timezone.utc
+    ).date().isoformat()
+    sitemap_loc = base_url.rstrip("/") + "/sitemap.xml"
+    sitemap_index_xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        "  <sitemap>\n"
+        f"    <loc>{escape(sitemap_loc)}</loc>\n"
+        f"    <lastmod>{index_lastmod}</lastmod>\n"
+        "  </sitemap>\n"
+        "</sitemapindex>\n"
+    )
+    (out_dir / "sitemap_index.xml").write_text(sitemap_index_xml, encoding="utf-8")
+
+    robots_txt = (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /wp-admin/\n"
+        "Disallow: /wp-login.php\n"
+        "Disallow: /wp-json/\n"
+        "Disallow: /xmlrpc.php\n\n"
+        f"Sitemap: {base_url.rstrip('/')}/sitemap.xml\n"
+        f"Sitemap: {base_url.rstrip('/')}/sitemap_index.xml\n"
+    )
+    (out_dir / "robots.txt").write_text(robots_txt, encoding="utf-8")
+
+    headers_txt = (
+        "/*\n"
+        "  X-Content-Type-Options: nosniff\n"
+        "  Referrer-Policy: strict-origin-when-cross-origin\n\n"
+        "/assets/*\n"
+        "  Cache-Control: public, max-age=31536000, immutable\n\n"
+        "/wp-content/*\n"
+        "  Cache-Control: public, max-age=31536000, immutable\n\n"
+        "/wp-includes/*\n"
+        "  Cache-Control: public, max-age=31536000, immutable\n\n"
+        "/sitemap*.xml\n"
+        "  Cache-Control: public, max-age=3600\n\n"
+        "/robots.txt\n"
+        "  Cache-Control: public, max-age=3600\n"
+    )
+    (out_dir / "_headers").write_text(headers_txt, encoding="utf-8")
+
+    return len(canonical_entries), len(sorted_items)
+
+
 def main() -> int:
     args = parse_args()
     xml_path = Path(args.xml).resolve()
@@ -450,15 +611,19 @@ def main() -> int:
     if not fallback_404.exists():
         fallback_404.write_text(
             "<!doctype html><html><head><meta charset='utf-8'>"
+            "<meta name='robots' content='noindex, nofollow'>"
             f"<meta name='google-site-verification' content='{GOOGLE_SITE_VERIFICATION_CONTENT}'>"
             "<title>404</title></head><body><h1>404 - Not Found</h1></body></html>",
             encoding="utf-8",
         )
 
+    sitemap_urls, _ = generate_seo_files(out_dir, base_url)
+
     print()
     print("=== Export Summary ===")
     print(f"Pages saved: {len(visited_pages)}")
     print(f"Assets saved: {len(downloaded_assets)}")
+    print(f"Sitemap URLs: {sitemap_urls}")
     print(f"Failed pages: {len(failed_pages)}")
     print(f"Failed assets: {len(failed_assets)}")
     if failed_pages:

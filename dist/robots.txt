@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /wp-admin/
+Disallow: /wp-login.php
+Disallow: /wp-json/
+Disallow: /xmlrpc.php
+
+Sitemap: https://daktarbarta.com/sitemap.xml
+Sitemap: https://daktarbarta.com/sitemap_index.xml
